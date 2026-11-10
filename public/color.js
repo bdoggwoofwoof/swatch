@@ -61,7 +61,8 @@
     const la = luminance(a), lb = luminance(b);
     return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
   }
-  const textOn = hex => (contrast(hex, '#FFFFFF') >= contrast(hex, '#111111') ? '#FFFFFF' : '#111111');
+  // Pure white or pure black: one of the two always reaches at least 4.58:1 on any color.
+  const textOn = hex => (contrast(hex, '#FFFFFF') >= contrast(hex, '#000000') ? '#FFFFFF' : '#000000');
 
   // Nearest color name (Lab distance) from window.COLOR_NAMES [[name, hex], ...]
   let nameLabs = null;

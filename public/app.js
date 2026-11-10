@@ -28,10 +28,21 @@
   const SPECS = {};
   window.CUSTOM_NAMES = window.CUSTOM_NAMES || {};
   BUILTIN.forEach(b => b.c.forEach(([n, h, pms, cmyk]) => { if (h !== '#FFFFFF' && h !== '#000000') window.CUSTOM_NAMES[h] = n; SPECS[h] = { name: n, pms, cmyk }; }));
+  const BUILTIN_IDS = new Set(BUILTIN.map(b => b.id));
+  const isBuiltin = p => !!p && BUILTIN_IDS.has(p.id);
+  // Where a new palette goes: the collection last saved to, else Favorites, else any collection that isn't the built-in one.
+  function defaultColl(except) {
+    const ok = c => c && c !== except && lib.collections.includes(c);
+    const last = store.get('swatch.lastColl', null);
+    if (ok(last)) return last;
+    if (ok('Favorites')) return 'Favorites';
+    return lib.collections.find(c => c !== 'UNC' && c !== except) || lib.collections.find(c => c !== except) || 'Favorites';
+  }
   (function seed() {
     const done = store.get('swatch.seeded', []);
     let changed = false;
-    if (!lib.collections.includes('UNC')) { lib.collections.unshift('UNC'); changed = true; }
+    // Add the UNC collection only the first time this browser is seeded, so renaming or deleting it sticks.
+    if (!done.length && !lib.collections.includes('UNC')) { lib.collections.push('UNC'); changed = true; }
     BUILTIN.slice().reverse().forEach(b => {
       if (done.includes(b.id)) return;
       if (!lib.palettes.some(p => p.id === b.id)) lib.palettes.unshift({ id: b.id, name: b.name, collection: 'UNC', note: b.note, colors: b.c.map(x => x[1]), created: Date.now(), updated: Date.now() });
@@ -100,10 +111,10 @@
           <span class="nm">${esc(C.nameOf(c.hex))}</span>
         </div>
         <div class="acts">
-          <button data-act="lock" class="${c.locked ? 'on' : ''}" aria-pressed="${c.locked}" aria-label="${c.locked ? 'Unlock' : 'Lock'} color">${c.locked ? I.lock : I.unlock}</button>
-          <button data-act="edit" aria-label="Shades and edit">${I.shades}</button>
-          <button data-act="remove" aria-label="Remove color" ${state.colors.length <= MIN ? 'disabled' : ''}>${I.x}</button>
-          <button data-act="drag" class="drag" aria-label="Drag to reorder">${I.grip}</button>
+          <button data-act="lock" class="${c.locked ? 'on' : ''}" aria-pressed="${c.locked}" aria-label="Lock color ${i + 1}">${c.locked ? I.lock : I.unlock}</button>
+          <button data-act="edit" aria-label="Adjust color ${i + 1}">${I.shades}</button>
+          <button data-act="remove" aria-label="Remove color ${i + 1}" ${state.colors.length <= MIN ? 'disabled' : ''}>${I.x}</button>
+          <button data-act="drag" class="drag" aria-label="Move color ${i + 1}: drag, or use arrow keys">${I.grip}</button>
         </div>`;
       pal.appendChild(el);
     });
@@ -112,9 +123,18 @@
     $('#plusBtn').disabled = state.colors.length >= MAX;
     writeHash();
     updateUndo();
+    fitRows();
     store.set('swatch.current', { colors: state.colors, mode: state.mode, libId: state.libId });
     if ($('#view-contrast').classList.contains('active')) renderContrast();
   }
+  // When rows get short (many colors, small screen), hide color names so nothing overlaps.
+  function fitRows() {
+    const n = state.colors.length || 1;
+    pal.classList.remove('compact');
+    const v = getComputedStyle(pal).flexDirection !== 'row';
+    if (v && pal.clientHeight && pal.clientHeight / n < 60) pal.classList.add('compact');
+  }
+  window.addEventListener('resize', fitRows);
 
   pal.addEventListener('click', e => {
     const b = e.target.closest('button[data-act]'); if (!b) return;
@@ -122,8 +142,18 @@
     const act = b.dataset.act;
     if (act === 'copy') copy(c.hex, `Copied ${c.hex}`);
     else if (act === 'lock') { pushHistory(); c.locked = !c.locked; render(); }
-    else if (act === 'remove') { if (state.colors.length > MIN) { pushHistory(); state.colors.splice(i, 1); render(); } }
+    else if (act === 'remove') { if (state.colors.length > MIN) { pushHistory(); state.colors.splice(i, 1); render(); toast(`Removed ${c.hex}`, 'Undo', undo); } }
     else if (act === 'edit') openEdit(i);
+    if (act === 'lock') { const b2 = pal.children[i] && pal.children[i].querySelector('[data-act=lock]'); if (b2) b2.focus(); }
+  });
+  // Arrow keys on the drag handle move the color without dragging.
+  pal.addEventListener('keydown', e => {
+    const h = e.target.closest('.drag'); if (!h) return;
+    const back = ['ArrowUp', 'ArrowLeft'].includes(e.key), fwd = ['ArrowDown', 'ArrowRight'].includes(e.key);
+    if (!back && !fwd) return;
+    e.preventDefault();
+    const i = +h.closest('.sw').dataset.i, j = moveColor(i, back ? -1 : 1);
+    if (j !== i) { pal.children[j].querySelector('.drag').focus(); toast(`Moved to position ${j + 1}`); }
   });
 
   // drag to reorder (pointer events; works with touch)
@@ -178,14 +208,25 @@
     render();
   });
   $('#pasteBtn').addEventListener('click', () => {
-    openSheet(`<h3>Open a palette</h3><p class="muted small">Paste hex codes in any form: a palette code, a list, or CSS.</p><textarea id="pcTxt" rows="3" style="width:100%;border-radius:10px;border:1px solid var(--line);background:var(--bg);padding:10px;font:14px ui-monospace,monospace" placeholder="264653-2A9D8F-E9C46A-F4A261-E76F51"></textarea><div class="row gap"><button class="pill primary" id="pcGo">Open</button></div>`, root => {
+    openSheet(`<h2 class="st">Open a palette</h2><label class="small" for="pcTxt" style="display:block;margin-bottom:6px">Paste colors in any form: hex codes like #1D3557 or #FFF, rgb(29, 53, 87), a list, a link, or CSS.</label><textarea id="pcTxt" rows="3" style="width:100%;border-radius:10px;border:1px solid var(--line);background:var(--bg);padding:10px;font:14px ui-monospace,monospace" placeholder="264653-2A9D8F-E9C46A-F4A261-E76F51"></textarea><div class="row gap"><button class="pill primary" id="pcGo">Open</button></div>`, root => {
       root.querySelector('#pcGo').addEventListener('click', () => {
-        const found = (root.querySelector('#pcTxt').value.match(/#?\b[0-9a-fA-F]{6}\b/g) || []).map(x => C.normHex(x)).slice(0, MAX);
-        if (found.length < MIN) { toast('Paste at least two hex codes'); return; }
+        const found = parseColors(root.querySelector('#pcTxt').value).slice(0, MAX);
+        if (found.length < MIN) { toast("Couldn't find two colors. Paste codes like #1D3557."); return; }
         closeSheet(); setColors(found); toast(`Opened ${found.length} colors`);
       });
     });
   });
+  // Finds colors in pasted text, in the order they appear: #RRGGBB, #RGB, bare RRGGBB, rgb()/rgba().
+  function parseColors(text) {
+    // No lookbehind here: older iPhone Safari can't parse it, and a syntax error would stop the whole app.
+    const out = [], re = /rgba?\(\s*(\d{1,3})[\s,]+(\d{1,3})[\s,]+(\d{1,3})[^)]*\)|#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})(?![0-9a-fA-F])|(^|[^0-9a-zA-Z#])([0-9a-fA-F]{6})(?![0-9a-zA-Z])/g;
+    let m;
+    while ((m = re.exec(text))) {
+      const hex = m[1] != null ? C.rgbToHex(Math.min(255, +m[1]), Math.min(255, +m[2]), Math.min(255, +m[3])) : C.normHex('#' + (m[4] || m[6]));
+      if (hex) out.push(hex);
+    }
+    return out;
+  }
   $('#undoBtn').addEventListener('click', undo);
   $('#redoBtn').addEventListener('click', redo);
   function undo() { if (!history.length) return; future.push(snapshot()); state.colors = JSON.parse(history.pop()); render(); }
@@ -195,7 +236,8 @@
     const tag = (e.target.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'select' || tag === 'textarea' || !$('#sheet').hidden) { if (e.key === 'Escape') closeSheet(); return; }
     if (!$('#view-create').classList.contains('active')) return;
-    if (e.code === 'Space') { e.preventDefault(); generate(); }
+    // Space generates only when no button or control has focus; otherwise it presses that control.
+    if (e.code === 'Space' && !e.target.closest('button,a,input,select,textarea,label,[tabindex]')) { e.preventDefault(); generate(); }
     else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
   });
 
@@ -205,33 +247,71 @@
   pal.addEventListener('touchend', e => { if (sy == null) return; const dy = sy - e.changedTouches[0].clientY; sy = null; if (dy > 80) generate(); }, { passive: true });
 
   // ---------- sheet ----------
-  let lastFocus = null;
-  function openSheet(html, onMount) {
+  let lastFocus = null, onSheetClose = null;
+  const behindSheet = () => [$('header.top'), $('main'), $('nav.tabs')];
+  // onClose runs on every way of closing (Done, ✕, Escape, tapping outside), so sheets can commit their changes.
+  function openSheet(html, onMount, onClose) {
+    if (!$('#sheet').hidden) closeSheet(true);
     lastFocus = document.activeElement;
-    $('#sheetBody').innerHTML = html;
+    onSheetClose = onClose || null;
+    const body = $('#sheetBody');
+    body.innerHTML = html;
+    const title = body.querySelector('.st');
+    if (title) { title.id = 'sheetTitle'; title.tabIndex = -1; $('#sheet').setAttribute('aria-labelledby', 'sheetTitle'); }
     $('#sheet').hidden = false; $('#scrim').hidden = false;
-    if (onMount) onMount($('#sheetBody'));
-    const f = $('#sheetBody').querySelector('button,input,select'); if (f) f.focus({ preventScroll: true });
+    behindSheet().forEach(el => el.inert = true);
+    if (onMount) onMount(body);
+    // Focus the title, not a text field, so the phone keyboard doesn't pop up over the sheet.
+    (title || $('#sheetX')).focus({ preventScroll: true });
   }
-  function closeSheet() { $('#sheet').hidden = true; $('#scrim').hidden = true; $('#sheetBody').innerHTML = ''; if (lastFocus) lastFocus.focus({ preventScroll: true }); }
-  $('#scrim').addEventListener('click', closeSheet);
-  $('#sheetX').addEventListener('click', () => { $('#scrim').click(); });
+  function closeSheet(keepFocus) {
+    if ($('#sheet').hidden) return;
+    const cb = onSheetClose; onSheetClose = null;
+    if (cb) cb();
+    $('#sheet').hidden = true; $('#scrim').hidden = true; $('#sheetBody').innerHTML = '';
+    $('#sheet').removeAttribute('aria-labelledby');
+    behindSheet().forEach(el => el.inert = false);
+    if (!keepFocus && lastFocus && document.contains(lastFocus)) lastFocus.focus({ preventScroll: true });
+  }
+  $('#scrim').addEventListener('click', () => closeSheet());
+  $('#sheetX').addEventListener('click', () => closeSheet());
+  // Keep Tab inside the open sheet.
+  $('#sheet').addEventListener('keydown', e => {
+    if (e.key !== 'Tab') return;
+    const f = Array.from($('#sheet').querySelectorAll('button,input,select,textarea,[tabindex]:not([tabindex="-1"]),a[href]')).filter(x => !x.disabled && !x.closest('[hidden]'));
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && (document.activeElement === first || document.activeElement.id === 'sheetTitle')) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
 
   // edit / shades
+  const vertical = () => getComputedStyle(pal).flexDirection !== 'row';
+  // Move a color one place earlier (-1) or later (+1). Used by the Adjust sheet and by arrow keys on the drag handle.
+  function moveColor(i, d) {
+    const j = i + d; if (j < 0 || j >= state.colors.length) return i;
+    pushHistory();
+    const [m] = state.colors.splice(i, 1); state.colors.splice(j, 0, m);
+    render();
+    return j;
+  }
   function openEdit(i) {
-    const start = state.colors[i].hex;
+    let idx = i, removed = false, pushed = false, moved = false;
+    const start = state.colors[idx].hex;
     let cur = start;
-    const sh = C.shades(start, 15);
+    const sh = C.shades(start, 11);
+    const v = vertical();
+    const earlier = v ? 'Move up' : 'Move left', later = v ? 'Move down' : 'Move right';
     openSheet(`
-      <h3>Adjust color</h3>
+      <h2 class="st">Adjust color</h2>
       <div class="edit-top">
         <div class="big" id="eBig"></div>
         <input class="hexin" id="eHex" maxlength="7" autocapitalize="characters" aria-label="Hex code">
         <input type="color" id="ePick" aria-label="Color picker" style="width:56px;height:44px;border:0;background:none">
       </div>
       <div class="muted small" id="eName"></div>
-      <h2 style="margin-top:14px">Shades</h2>
-      <div class="shade-row" id="eShades">${sh.map(s => `<button data-h="${s}" style="background:${s};color:${C.textOn(s)}" aria-label="${s}"></button>`).join('')}</div>
+      <h3>Shades</h3>
+      <div class="shade-row" id="eShades">${sh.map(s => `<button data-h="${s}" style="background:${s};color:${C.textOn(s)}" aria-label="Shade ${s}"></button>`).join('')}</div>
       <div class="sliders">
         <label>Hue <input type="range" id="eH" min="0" max="359"><span id="eHv"></span></label>
         <label>Saturation <input type="range" id="eS" min="0" max="100"><span id="eSv"></span></label>
@@ -241,10 +321,16 @@
         <button class="pill" id="eReset">Reset</button>
         <button class="pill" id="eCopy">Copy hex</button>
         <button class="pill primary" id="eDone" style="margin-left:auto">Done</button>
+      </div>
+      <div class="row gap edit-more">
+        <button class="pill" id="eEarlier">${earlier}</button>
+        <button class="pill" id="eLater">${later}</button>
+        <button class="pill danger" id="eRemove" style="margin-left:auto">Remove color</button>
       </div>`, root => {
-      pushHistory();
       const set = (hex, from) => {
-        cur = hex; state.colors[i].hex = hex;
+        // Record one Undo step, on the first real change only.
+        if (hex !== cur && !pushed) { history.push(JSON.stringify(state.colors.map((c, k) => k === idx ? { ...c, hex: cur } : c))); if (history.length > 100) history.shift(); future = []; pushed = true; updateUndo(); }
+        cur = hex; state.colors[idx].hex = hex;
         root.querySelector('#eBig').style.background = hex;
         if (from !== 'hex') root.querySelector('#eHex').value = hex;
         if (from !== 'pick') root.querySelector('#ePick').value = hex.toLowerCase();
@@ -257,9 +343,19 @@
         root.querySelector('#eSv').textContent = root.querySelector('#eS').value + '%';
         root.querySelector('#eLv').textContent = root.querySelector('#eL').value + '%';
         root.querySelectorAll('#eShades button').forEach(b => b.classList.toggle('cur', b.dataset.h === hex));
-        const sw = pal.children[i]; if (sw) { sw.style.background = hex; sw.style.color = C.textOn(hex); sw.querySelector('.hex').textContent = hex.slice(1); sw.querySelector('.nm').textContent = C.nameOf(hex); }
+        const sw = pal.children[idx]; if (sw) { sw.style.background = hex; sw.style.color = C.textOn(hex); sw.querySelector('.hex').textContent = hex.slice(1); sw.querySelector('.nm').textContent = C.nameOf(hex); }
       };
       set(start);
+      const syncMove = () => { root.querySelector('#eEarlier').disabled = idx === 0; root.querySelector('#eLater').disabled = idx === state.colors.length - 1; root.querySelector('#eRemove').disabled = state.colors.length <= MIN; };
+      syncMove();
+      root.querySelector('#eEarlier').addEventListener('click', () => { moved = true; idx = moveColor(idx, -1); syncMove(); toast(`Moved to position ${idx + 1}`); });
+      root.querySelector('#eLater').addEventListener('click', () => { moved = true; idx = moveColor(idx, 1); syncMove(); toast(`Moved to position ${idx + 1}`); });
+      root.querySelector('#eRemove').addEventListener('click', () => {
+        if (state.colors.length <= MIN) return;
+        pushHistory(); const gone = state.colors.splice(idx, 1)[0]; removed = true;
+        closeSheet(true); render(); toast(`Removed ${gone.hex}`, 'Undo', undo);
+        const n = pal.children[Math.min(idx, state.colors.length - 1)]; if (n) n.querySelector('.hex').focus();
+      });
       root.querySelector('#eShades').addEventListener('click', e => { const b = e.target.closest('button'); if (b) set(b.dataset.h); });
       ['#eH', '#eS', '#eL'].forEach(id => root.querySelector(id).addEventListener('input', () => {
         set(C.hslToHex(+root.querySelector('#eH').value, root.querySelector('#eS').value / 100, root.querySelector('#eL').value / 100), 'slider');
@@ -268,10 +364,14 @@
       root.querySelector('#ePick').addEventListener('input', e => set(C.normHex(e.target.value), 'pick'));
       root.querySelector('#eReset').addEventListener('click', () => set(start));
       root.querySelector('#eCopy').addEventListener('click', () => copy(cur, `Copied ${cur}`));
-      root.querySelector('#eDone').addEventListener('click', () => { if (cur === start) history.pop(); closeSheet(); render(); });
+      root.querySelector('#eDone').addEventListener('click', () => closeSheet());
+    }, () => {
+      // Runs on every way of closing: keep the edit, and drop the Undo step if the color ended where it started.
+      if (removed) return;
+      if (pushed && cur === start && !moved) { history.pop(); }
+      render();
+      const sw = pal.children[idx]; if (sw) lastFocus = sw.querySelector('[data-act=edit]');
     });
-    // closing by scrim also commits
-    $('#scrim').addEventListener('click', render, { once: true });
   }
 
   // ---------- export ----------
@@ -295,7 +395,7 @@
     const snap = list ? list.map(h => ({ hex: h, locked: false })) : state.colors.slice();
     const withPal = fn => { const p = state.colors; state.colors = snap; try { return fn(); } finally { state.colors = p; } };
     openSheet(`
-      <h3>Export</h3>
+      <h2 class="st">Export</h2>
       <div class="export-grid">
         <button data-f="hex">Copy hex codes</button>
         <button data-f="css">CSS variables</button>
@@ -343,7 +443,7 @@
       x.fillText(C.nameOf(h), i * sw + sw / 2, barH + 146);
     });
     const url = cv.toDataURL('image/png');
-    openSheet(`<h3>Palette image</h3><img src="${url}" alt="Palette image" style="width:100%;border-radius:12px;border:1px solid var(--line)"><p class="muted small">Tap Save image, or press and hold the image.</p><div class="row gap"><button class="pill primary" id="imgSave">Save image</button><button class="pill" id="imgCopy">Copy image</button></div>`, root => {
+    openSheet(`<h2 class="st">Palette image</h2><img src="${url}" alt="Palette image" style="width:100%;border-radius:12px;border:1px solid var(--line)"><p class="muted small">Tap Save image, or press and hold the image.</p><div class="row gap"><button class="pill primary" id="imgSave">Save image</button><button class="pill" id="imgCopy">Copy image</button></div>`, root => {
       root.querySelector('#imgSave').addEventListener('click', () => cv.toBlob(b => saveFile(b, 'palette-' + hs.map(h => h.slice(1)).join('-') + '.png', 'Image saved'), 'image/png'));
       root.querySelector('#imgCopy').addEventListener('click', () => {
         try {
@@ -362,13 +462,16 @@
   function collOptions(sel) { return lib.collections.map(c => `<option ${c === sel ? 'selected' : ''}>${esc(c)}</option>`).join('') + '<option value="__new">+ New collection…</option>'; }
 
   function openSave() {
-    const existing = state.libId && lib.palettes.find(p => p.id === state.libId);
+    const opened = state.libId && lib.palettes.find(p => p.id === state.libId);
+    // Built-in palettes are read-only: saving one always makes a copy.
+    const existing = isBuiltin(opened) ? null : opened;
     const hs = hexes();
     openSheet(`
-      <h3>${existing ? 'Save palette' : 'Save to library'}</h3>
-      <div class="strip">${hs.map(h => `<button tabindex="-1" style="background:${h}"></button>`).join('')}</div>
+      <h2 class="st">${existing ? 'Save palette' : 'Save to library'}</h2>
+      ${isBuiltin(opened) ? `<p class="muted small">${esc(opened.name)} is a built-in palette, so this saves a copy.</p>` : ''}
+      <div class="strip" role="img" aria-label="Palette: ${hs.join(', ')}">${hs.map(h => `<span style="background:${h}"></span>`).join('')}</div>
       <label class="field">Name<input id="sName" value="${esc(suggestName(hs))}" maxlength="60"></label>
-      <label class="field">Collection<select id="sColl">${collOptions(existing ? existing.collection : lib.collections[0])}</select></label>
+      <label class="field">Collection<select id="sColl">${collOptions(existing ? existing.collection : defaultColl())}</select></label>
       <label class="field" id="sNewWrap" hidden>New collection name<input id="sNew" maxlength="40" placeholder="e.g. Instagram, Portfolio"></label>
       <div class="row gap">
         ${existing ? `<button class="pill" id="sUpd">Update “${esc(existing.name)}”</button>` : ''}
@@ -383,7 +486,8 @@
         if (existing && !asNew && name === suggestName(hs)) name = existing.name;
         if (existing && !asNew) { Object.assign(existing, { name, collection: c, colors: hs, updated: Date.now() }); }
         else { const p = { id: uid(), name, collection: c, colors: hs, created: Date.now(), updated: Date.now() }; lib.palettes.unshift(p); state.libId = p.id; }
-        saveLib(); store.set('swatch.current', { colors: state.colors, mode: state.mode, libId: state.libId });
+        store.set('swatch.lastColl', c);
+        saveLib(); askPersist(); store.set('swatch.current', { colors: state.colors, mode: state.mode, libId: state.libId });
         closeSheet(); toast(`Saved to ${c}`); renderLibrary();
       };
       root.querySelector('#sGo').addEventListener('click', () => doSave(true));
@@ -423,7 +527,7 @@
 
   function paletteMenu(p) {
     openSheet(`
-      <h3>${esc(p.name)}</h3>
+      <h2 class="st">${esc(p.name)}</h2>
       <div class="strip">${p.colors.map(h => `<button data-h="${h}" style="background:${h};color:${C.textOn(h)}">${h.slice(1)}</button>`).join('')}</div>
       ${p.note ? `<p class="small" style="line-height:1.45">${esc(p.note)}</p>` : ''}
       <div class="specs">${p.colors.map(h => { const sp = SPECS[h]; return `<div class="spec"><span style="background:${h}"></span><div><b>${esc(C.nameOf(h))}</b><small>${h}${sp ? ` · ${esc(sp.pms)} · CMYK ${esc(sp.cmyk)}` : ''} · RGB ${C.hexToRgb(h).join('/')}</small></div></div>`; }).join('')}</div>
@@ -452,7 +556,8 @@
         else if (a.dataset.a === 'dup') { const d = { ...p, id: uid(), name: p.name + ' copy', created: Date.now(), updated: Date.now(), colors: p.colors.slice() }; lib.palettes.splice(lib.palettes.indexOf(p), 0, d); saveLib(); closeSheet(); renderLibrary(); toast('Duplicated'); }
         else if (a.dataset.a === 'del') {
           const idx = lib.palettes.indexOf(p); lib.palettes.splice(idx, 1); saveLib(); closeSheet(); renderLibrary();
-          toast(`Deleted ${p.name}`, 'Undo', () => { lib.palettes.splice(idx, 0, p); saveLib(); renderLibrary(); });
+          // Undo can only put the palette back once, and only if it isn't already there.
+          toast(`Deleted ${p.name}`, 'Undo', () => { if (lib.palettes.some(x => x.id === p.id)) return; lib.palettes.splice(Math.min(idx, lib.palettes.length), 0, p); saveLib(); renderLibrary(); toast(`Restored ${p.name}`); });
         }
       });
     });
@@ -462,12 +567,12 @@
     const draw = root => {
       root.querySelector('#mcList').innerHTML = lib.collections.map((c, i) => {
         const n = lib.palettes.filter(p => p.collection === c).length;
-        return `<div class="row"><input class="hexin" style="flex:1;text-transform:none;font-weight:600" data-i="${i}" value="${esc(c)}" maxlength="40"><span class="muted small">${n}</span><button class="icon-btn" data-del="${i}" aria-label="Delete ${esc(c)}" ${lib.collections.length <= 1 ? 'disabled' : ''}>✕</button></div>`;
+        return `<div class="row"><input class="hexin" style="flex:1;text-transform:none;font-weight:600" data-i="${i}" value="${esc(c)}" maxlength="40" aria-label="Collection name"><span class="muted small">${n}</span><button class="icon-btn" data-del="${i}" aria-label="Delete ${esc(c)}" ${lib.collections.length <= 1 ? 'disabled' : ''}>✕</button></div>`;
       }).join('');
     };
-    openSheet(`<h3>Collections</h3><div id="mcList"></div>
-      <div class="row"><input class="hexin" id="mcNew" style="flex:1;text-transform:none" placeholder="New collection"><button class="pill primary" id="mcAdd">Add</button></div>
-      <p class="muted small">Deleting a collection moves its palettes to the first one.</p>`, root => {
+    openSheet(`<h2 class="st">Collections</h2><div id="mcList"></div>
+      <div class="row"><input class="hexin" id="mcNew" style="flex:1;text-transform:none" placeholder="New collection" aria-label="New collection name"><button class="pill primary" id="mcAdd">Add</button></div>
+      <p class="muted small">Deleting a collection moves its palettes to ${esc(defaultColl())}.</p>`, root => {
       draw(root);
       root.addEventListener('change', e => {
         const i = e.target.dataset.i; if (i == null) return;
@@ -476,7 +581,7 @@
       });
       root.addEventListener('click', e => {
         const d = e.target.closest('[data-del]');
-        if (d) { const old = lib.collections.splice(+d.dataset.del, 1)[0]; lib.palettes.forEach(p => { if (p.collection === old) p.collection = lib.collections[0]; }); saveLib(); draw(root); renderLibrary(); }
+        if (d) { const old = lib.collections[+d.dataset.del], to = defaultColl(old); lib.collections.splice(+d.dataset.del, 1); lib.palettes.forEach(p => { if (p.collection === old) p.collection = to; }); saveLib(); draw(root); renderLibrary(); toast(`Deleted ${old}. Its palettes moved to ${to}.`); }
         if (e.target.id === 'mcAdd') { const v = root.querySelector('#mcNew').value.trim(); if (v && !lib.collections.includes(v)) { lib.collections.push(v); saveLib(); draw(root); renderLibrary(); root.querySelector('#mcNew').value = ''; } }
       });
     });
@@ -484,14 +589,14 @@
 
   $('#backupBtn').addEventListener('click', () => {
     const txt = JSON.stringify({ app: 'swatch', version: 1, saved: new Date().toISOString(), ...lib });
-    copy(txt, 'Backup copied — paste it somewhere safe');
+    copy(txt, 'Backup copied — paste it somewhere safe'); markBackup();
   });
   $('#backupFileBtn').addEventListener('click', () => {
     const txt = JSON.stringify({ app: 'swatch', version: 1, saved: new Date().toISOString(), ...lib }, null, 2);
-    saveFile(new Blob([txt], { type: 'application/json' }), `swatch-backup-${new Date().toISOString().slice(0, 10)}.json`, 'Backup file saved');
+    saveFile(new Blob([txt], { type: 'application/json' }), `swatch-backup-${new Date().toISOString().slice(0, 10)}.json`, 'Backup file saved'); markBackup();
   });
   $('#pasteRestore').addEventListener('click', () => {
-    openSheet(`<h3>Restore from backup</h3><p class="muted small">Paste the backup text you copied earlier. Palettes you already have are kept.</p><textarea id="rsTxt" rows="6" style="width:100%;border-radius:10px;border:1px solid var(--line);background:var(--bg);padding:10px;font:12px ui-monospace,monospace"></textarea><div class="row gap"><button class="pill primary" id="rsGo">Restore</button></div>`, root => {
+    openSheet(`<h2 class="st">Restore from backup</h2><label class="small" for="rsTxt" style="display:block;margin-bottom:6px">Paste the backup text you copied earlier. Palettes you already have are kept.</label><textarea id="rsTxt" rows="6" style="width:100%;border-radius:10px;border:1px solid var(--line);background:var(--bg);padding:10px;font:12px ui-monospace,monospace"></textarea><div class="row gap"><button class="pill primary" id="rsGo">Restore</button></div>`, root => {
       root.querySelector('#rsGo').addEventListener('click', () => { if (restoreFrom(root.querySelector('#rsTxt').value)) closeSheet(); });
     });
   });
@@ -503,12 +608,14 @@
       for (const p of d.palettes) {
         const cols = (p.colors || []).map(C.normHex).filter(Boolean);
         if (cols.length < MIN || lib.palettes.some(x => x.id === p.id)) continue;
-        lib.palettes.push({ id: p.id || uid(), name: String(p.name || suggestName(cols)).slice(0, 60), collection: String(p.collection || lib.collections[0]).slice(0, 40), colors: cols.slice(0, MAX), created: p.created || Date.now(), updated: p.updated || Date.now() });
+        const np = { id: p.id || uid(), name: String(p.name || suggestName(cols)).slice(0, 60), collection: String(p.collection || defaultColl()).slice(0, 40), colors: cols.slice(0, MAX), created: p.created || Date.now(), updated: p.updated || Date.now() };
+        if (typeof p.note === 'string') np.note = p.note.slice(0, 600);
+        lib.palettes.push(np);
         added++;
       }
       for (const c of d.collections || []) if (typeof c === 'string' && !lib.collections.includes(c)) lib.collections.push(c.slice(0, 40));
       lib.palettes.forEach(p => { if (!lib.collections.includes(p.collection)) lib.collections.push(p.collection); });
-      saveLib(); renderLibrary(); toast(`Restored ${added} palette${added === 1 ? '' : 's'}`); return true;
+      saveLib(); renderLibrary(); toast(added ? `Restored ${added} palette${added === 1 ? '' : 's'}` : 'You already have all of these palettes'); return true;
     } catch { toast("That isn't a Swatch backup"); return false; }
   }
   $('#restoreIn').addEventListener('change', async e => { const f = e.target.files[0]; e.target.value = ''; if (f) restoreFrom(await f.text()); });
@@ -518,6 +625,8 @@
   let photo = { px: null, scale: 1, picks: [], sel: 0 };
   $('#fileIn').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadPhoto(f); });
   const drop = $('#drop');
+  drop.addEventListener('click', () => $('#fileIn').click());
+  $('#restoreBtn').addEventListener('click', () => $('#restoreIn').click());
   ['dragover', 'dragenter'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); }));
   drop.addEventListener('drop', e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && f.type.startsWith('image/')) loadPhoto(f); });
 
@@ -548,25 +657,47 @@
   }
   function drawPhoto() {
     $('#photoStrip').innerHTML = photo.picks.map((p, i) => `<button class="${i === photo.sel ? 'sel' : ''}" data-i="${i}" style="background:${p.hex};color:${C.textOn(p.hex)}" aria-label="Color ${i + 1} ${p.hex}">${p.hex.slice(1)}</button>`).join('');
-    $('#markers').innerHTML = photo.picks.map((p, i) => `<div class="marker ${i === photo.sel ? 'sel' : ''}" style="left:${(p.x / pc.width) * 100}%;top:${(p.y / pc.height) * 100}%;background:${p.hex}"></div>`).join('');
+    $('#markers').innerHTML = photo.picks.map((p, i) => `<button type="button" class="marker ${i === photo.sel ? 'sel' : ''}" data-i="${i}" style="left:${(p.x / pc.width) * 100}%;top:${(p.y / pc.height) * 100}%;background:${p.hex}" aria-label="Color ${i + 1}, ${p.hex}. Drag, or use arrow keys, to pick a different spot"></button>`).join('');
   }
   $('#photoStrip').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { photo.sel = +b.dataset.i; drawPhoto(); } });
   $('#photoCount').addEventListener('input', e => { $('#photoCountLbl').textContent = e.target.value; });
   $('#photoCount').addEventListener('change', extract);
   $('#photoStyle').addEventListener('change', extract);
   $('#photoAgain').addEventListener('click', extract);
-  let picking = false;
-  const pickAt = e => {
-    const r = pc.getBoundingClientRect();
-    const x = Math.max(0, Math.min(pc.width - 1, ((e.clientX - r.left) / r.width) * pc.width));
-    const y = Math.max(0, Math.min(pc.height - 1, ((e.clientY - r.top) / r.height) * pc.height));
+  // Repicking: only dragging a marker changes a color. A tap or scroll on the photo itself does nothing.
+  const pickXY = (i, x, y) => {
+    x = Math.max(0, Math.min(pc.width - 1, x)); y = Math.max(0, Math.min(pc.height - 1, y));
     const d = px2d.getImageData(Math.floor(x), Math.floor(y), 1, 1).data;
-    const p = photo.picks[photo.sel]; if (!p) return;
-    Object.assign(p, { hex: C.rgbToHex(d[0], d[1], d[2]), x, y }); drawPhoto();
+    const p = photo.picks[i]; if (!p) return;
+    Object.assign(p, { hex: C.rgbToHex(d[0], d[1], d[2]), x, y });
   };
-  $('#photoWrap').addEventListener('pointerdown', e => { picking = true; $('#photoWrap').setPointerCapture(e.pointerId); pickAt(e); });
-  $('#photoWrap').addEventListener('pointermove', e => { if (picking) pickAt(e); });
-  $('#photoWrap').addEventListener('pointerup', () => { picking = false; });
+  const moveMarker = (i, e) => {
+    const r = pc.getBoundingClientRect();
+    pickXY(i, ((e.clientX - r.left) / r.width) * pc.width, ((e.clientY - r.top) / r.height) * pc.height);
+    const m = $('#markers').children[i]; const p = photo.picks[i];
+    if (m) { m.style.left = (p.x / pc.width) * 100 + '%'; m.style.top = (p.y / pc.height) * 100 + '%'; m.style.background = p.hex; }
+  };
+  let dragMark = null;
+  $('#markers').addEventListener('pointerdown', e => {
+    const m = e.target.closest('.marker'); if (!m) return;
+    e.preventDefault();
+    const i = +m.dataset.i; photo.sel = i; dragMark = { i, id: e.pointerId };
+    m.setPointerCapture(e.pointerId);
+    $$('#markers .marker').forEach(x => x.classList.toggle('sel', x === m));
+  });
+  $('#markers').addEventListener('pointermove', e => { if (dragMark && e.pointerId === dragMark.id) moveMarker(dragMark.i, e); });
+  const endMark = () => { if (!dragMark) return; dragMark = null; drawPhoto(); };
+  $('#markers').addEventListener('pointerup', endMark);
+  $('#markers').addEventListener('pointercancel', endMark);
+  $('#markers').addEventListener('keydown', e => {
+    const m = e.target.closest('.marker'); if (!m) return;
+    const step = Math.max(2, Math.round(pc.width / 60)), d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    const i = +m.dataset.i, p = photo.picks[i]; photo.sel = i;
+    pickXY(i, p.x + d[0], p.y + d[1]); drawPhoto();
+    const again = $('#markers').children[i]; if (again) again.focus();
+  });
   $('#photoUse').addEventListener('click', () => { if (!photo.picks.length) return; setColors(photo.picks.map(p => p.hex)); showView('create'); toast('Palette from photo'); });
 
   // ---------- contrast ----------
@@ -589,15 +720,18 @@
   }
   function renderContrast() {
     const hs = hexes();
-    $('#ccChips').innerHTML = hs.map(h => `<button class="chip" data-h="${h}" style="background:${h};color:${C.textOn(h)}" aria-label="${h}">${h.slice(1)}</button>`).join('');
-    const all = hs.concat(['#FFFFFF', '#000000']);
-    let t = '<tr><th></th>' + all.map(h => `<th><span style="background:${h};border:1px solid var(--line)"></span></th>`).join('') + '</tr>';
+    $('#ccChips').innerHTML = hs.map(h => `<button class="chip" data-h="${h}" style="background:${h};color:${C.textOn(h)}" aria-label="Use ${h} as ${ccTarget === 'fg' ? 'text' : 'background'}">${h.slice(1)}</button>`).join('');
+    const all = [...new Set(hs.concat(['#FFFFFF', '#000000']))];
+    // Rows are text colors, columns are backgrounds. Ratios are rounded down, so a fail never shows as a pass.
+    let t = '<caption class="sr">Contrast of each palette color as text (rows) on each as background (columns)</caption><tr><th scope="col"><span class="sr">Text color, then background</span></th>' + all.map(h => `<th scope="col"><span class="dot2" style="background:${h}"></span><span class="sr">Background ${h}</span></th>`).join('') + '</tr>';
     for (const fg of all) {
-      t += `<tr><th><span style="background:${fg};border:1px solid var(--line)"></span></th>`;
+      t += `<tr><th scope="row"><span class="dot2" style="background:${fg}"></span><span class="sr">Text ${fg}</span></th>`;
       for (const bg of all) {
         if (fg === bg) { t += '<td></td>'; continue; }
-        const r = C.contrast(fg, bg);
-        t += `<td class="${r < 3 ? 'fail' : ''}" style="background:${bg};color:${fg}" title="${fg} on ${bg}">${r.toFixed(1)}${r >= 7 ? '<br>AAA' : r >= 4.5 ? '<br>AA' : r >= 3 ? '<br>Lg' : ''}</td>`;
+        const r = C.contrast(fg, bg), shown = (Math.floor(r * 10) / 10).toFixed(1);
+        const lvl = r >= 7 ? 'AAA' : r >= 4.5 ? 'AA' : r >= 3 ? 'Large' : '';
+        // "Aa" shows the pair itself; the ratio is printed in black or white so it can always be read.
+        t += `<td class="${r < 3 ? 'fail' : ''}"><button type="button" data-fg="${fg}" data-bg="${bg}" style="background:${bg};color:${C.textOn(bg)}" aria-label="${fg} text on ${bg}: ${shown} to 1${lvl ? ', passes ' + (lvl === 'Large' ? 'for large text only' : lvl) : ', fails'}"><span class="aa" aria-hidden="true" style="color:${fg}">Aa</span><span class="rt">${lvl ? '' : '✕ '}${shown}</span></button></td>`;
       }
       t += '</tr>';
     }
@@ -605,8 +739,8 @@
     updateCC();
   }
   $('#ccChips').addEventListener('click', e => { const b = e.target.closest('.chip'); if (b) setCC(ccTarget, b.dataset.h); });
-  $('#ccGrid').addEventListener('click', e => { const td = e.target.closest('td[title]'); if (!td) return; const [fg, bg] = td.title.split(' on '); setCC('fg', fg); setCC('bg', bg); window.scrollTo(0, 0); $('#view-contrast').scrollTo({ top: 0, behavior: 'smooth' }); });
-  $('#ccTarget').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; ccTarget = b.dataset.t; $$('#ccTarget button').forEach(x => x.classList.toggle('primary', x === b)); });
+  $('#ccGrid').addEventListener('click', e => { const b = e.target.closest('button[data-fg]'); if (!b) return; setCC('fg', b.dataset.fg); setCC('bg', b.dataset.bg); $('#view-contrast').scrollTo({ top: 0, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); toast(`Checking ${b.dataset.fg} on ${b.dataset.bg}`); });
+  $('#ccTarget').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; ccTarget = b.dataset.t; $$('#ccTarget button').forEach(x => { x.classList.toggle('primary', x === b); x.setAttribute('aria-pressed', x === b); }); renderContrast(); });
   $('#ccFg').addEventListener('input', e => { $('#ccFgHex').value = C.normHex(e.target.value); updateCC(); });
   $('#ccBg').addEventListener('input', e => { $('#ccBgHex').value = C.normHex(e.target.value); updateCC(); });
   ['Fg', 'Bg'].forEach(k => $('#cc' + k + 'Hex').addEventListener('input', e => { let v = e.target.value.trim(); if (!v.startsWith('#')) v = '#' + v; const n = C.normHex(v); if (n) { $('#cc' + k).value = n.toLowerCase(); updateCC(); } }));
@@ -628,13 +762,31 @@
   // ---------- views ----------
   function showView(v) {
     $$('.view').forEach(x => x.classList.toggle('active', x.id === 'view-' + v));
-    $$('.tab').forEach(t => { const on = t.dataset.view === v; t.classList.toggle('active', on); t.setAttribute('aria-selected', on); });
+    $$('.tab').forEach(t => { const on = t.dataset.view === v; t.classList.toggle('active', on); if (on) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current'); });
     $('#createActions').style.visibility = v === 'create' ? 'visible' : 'hidden';
-    if (v === 'library') renderLibrary();
+    if (v === 'library') { renderLibrary(); renderBackupNote(); }
+    if (v === 'create') fitRows();
     if (v === 'contrast') renderContrast();
     store.set('swatch.view', v);
   }
   $$('.tab').forEach(t => t.addEventListener('click', () => showView(t.dataset.view)));
+
+  // ---------- keeping palettes safe ----------
+  // Ask the browser not to clear Swatch's storage (Safari can clear sites that go unvisited, unless installed).
+  function askPersist() { try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { }); } catch { } }
+  const ownPalettes = () => lib.palettes.filter(p => !isBuiltin(p)).length;
+  function markBackup() { store.set('swatch.lastBackup', Date.now()); renderBackupNote(); }
+  function renderBackupNote() {
+    const el = $('#backupNote'); if (!el) return;
+    const last = store.get('swatch.lastBackup', 0), n = ownPalettes();
+    const days = last ? Math.floor((Date.now() - last) / 864e5) : null;
+    const when = last ? new Date(last).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+    el.classList.toggle('warn', n > 0 && (!last || days >= 30));
+    el.textContent = !n ? 'Palettes live on this device only.'
+      : !last ? `You have ${n} palette${n === 1 ? '' : 's'} saved only on this device and no backup yet. Save a backup file so a cleared browser can't lose them.`
+      : days >= 30 ? `Last backup ${when}, ${days} days ago. Save a new backup file to keep recent palettes safe.`
+      : `Last backup ${when}. Palettes live on this device; restore a backup file to move them to another one.`;
+  }
 
   // ---------- helpers ----------
   async function saveFile(blob, name, okMsg) {
@@ -654,12 +806,17 @@
     }
     toast(msg || 'Copied');
   }
-  let tt;
+  let tt, tclear;
+  function hideToast() {
+    const t = $('#toast'); t.classList.remove('show');
+    // Remove the message (and any Undo button) once it has faded, so nothing invisible stays tappable.
+    clearTimeout(tclear); tclear = setTimeout(() => { if (!t.classList.contains('show')) t.innerHTML = ''; }, 250);
+  }
   function toast(msg, actLabel, act) {
-    const t = $('#toast'); clearTimeout(tt);
-    t.innerHTML = esc(msg) + (actLabel ? ` <button>${esc(actLabel)}</button>` : '');
-    if (actLabel) t.querySelector('button').onclick = () => { act(); t.classList.remove('show'); };
-    t.classList.add('show'); tt = setTimeout(() => t.classList.remove('show'), actLabel ? 5000 : 1800);
+    const t = $('#toast'); clearTimeout(tt); clearTimeout(tclear);
+    t.innerHTML = esc(msg) + (actLabel ? ` <button type="button">${esc(actLabel)}</button>` : '');
+    if (actLabel) { let used = false; t.querySelector('button').onclick = () => { if (used) return; used = true; hideToast(); act(); }; }
+    t.classList.add('show'); tt = setTimeout(hideToast, actLabel ? 6000 : 2000);
   }
 
   // ---------- boot ----------
@@ -675,6 +832,7 @@
   window.addEventListener('hashchange', () => { const h = readHash(); if (h && h.join() !== hexes().join()) setColors(h); });
   showView(store.get('swatch.view', 'create'));
 
+  if (ownPalettes()) askPersist();
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => { });
   window.__swatch = { state, lib, generate, showView };
 })();
